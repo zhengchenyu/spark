@@ -94,14 +94,11 @@ abstract class PartitioningAwareFileIndex(
       }
       prunePartitions(partitionFilters, partitionSpec()).map {
         case PartitionPath(values, path) =>
-          val files: Seq[FileStatus] = leafDirToChildrenFiles.get(path) match {
-            case Some(existingDir) =>
-              // Directory has children files in it, return them
-              existingDir.filter(f => matchPathPattern(f) && isNonEmptyFile(f)).toImmutableArraySeq
-
-            case None =>
-              // Directory does not exist, or has no children files
-              Nil
+          val files = leafDirToChildrenFiles.flatMap {
+            case (leafDir, childrenFiles) if leafDir.toString.startsWith(path.toString) =>
+              childrenFiles.filter(f => matchPathPattern(f) && isNonEmptyFile(f))
+                .toImmutableArraySeq
+            case _ => Nil
           }
           filePruningRunner.prune(PartitionDirectory(values, files.toArray))
       }
@@ -138,10 +135,14 @@ abstract class PartitioningAwareFileIndex(
         //    Find its children files from leafDirToChildrenFiles and include them.
         // 2. The path is a file, then it will be present in leafFiles. Include this path.
         // 3. The path is a directory, but has no children files. Do not include this path.
-
-        leafDirToChildrenFiles.get(qualifiedPath)
-          .orElse { leafFiles.get(qualifiedPath).map(Array(_)) }
-          .getOrElse(Array.empty)
+        leafDirToChildrenFiles.flatMap {
+          case (leafDir, childrenFiles) if leafDir.toString.startsWith(path.toString) =>
+            childrenFiles.toImmutableArraySeq
+          case _ => Nil
+        } match {
+          case arr if arr.nonEmpty => arr
+          case _ => leafFiles.get(qualifiedPath).map(Array(_)).getOrElse(Array.empty)
+        }
       }
     } else {
       leafFiles.values.toSeq
