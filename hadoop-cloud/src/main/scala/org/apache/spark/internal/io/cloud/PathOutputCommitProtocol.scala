@@ -24,7 +24,7 @@ import org.apache.hadoop.mapreduce.TaskAttemptContext
 import org.apache.hadoop.mapreduce.lib.output.{FileOutputCommitter, PathOutputCommitter, PathOutputCommitterFactory}
 
 import org.apache.spark.internal.io.FileNameSpec
-import org.apache.spark.internal.io.HadoopMapReduceCommitProtocol
+import org.apache.spark.sql.execution.datasources.SQLHadoopMapReduceCommitProtocol
 
 /**
  * Spark Commit protocol for Path Output Committers.
@@ -57,12 +57,9 @@ import org.apache.spark.internal.io.HadoopMapReduceCommitProtocol
 class PathOutputCommitProtocol(
     jobId: String,
     dest: String,
-    dynamicPartitionOverwrite: Boolean = false)
-  extends HadoopMapReduceCommitProtocol(jobId, dest, dynamicPartitionOverwrite)
+    mode: String = "")
+  extends SQLHadoopMapReduceCommitProtocol(jobId, dest, mode)
     with Serializable {
-
-  /** The committer created. */
-  @transient private var committer: PathOutputCommitter = _
 
   require(dest != null, "Null destination specified")
 
@@ -87,7 +84,7 @@ class PathOutputCommitProtocol(
    */
   override protected def setupCommitter(context: TaskAttemptContext): PathOutputCommitter = {
     logTrace(s"Setting up committer for path $destination")
-    committer = PathOutputCommitterFactory.createCommitter(destPath, context)
+    committer = PathOutputCommitterFactory.createCommitter(stagingDir, context)
 
     // Special feature to force out the FileOutputCommitter, so as to guarantee
     // that the binding is working properly.
@@ -127,7 +124,7 @@ class PathOutputCommitProtocol(
         }
       }
     }
-    committer
+    committer.asInstanceOf[PathOutputCommitter]
   }
 
 
@@ -155,7 +152,7 @@ class PathOutputCommitProtocol(
       dir: Option[String],
       spec: FileNameSpec): String = {
 
-    val workDir = committer.getWorkPath
+    val workDir = committer.asInstanceOf[PathOutputCommitter].getWorkPath
     val parent = dir.map {
       d => new Path(workDir, d)
     }.getOrElse(workDir)
