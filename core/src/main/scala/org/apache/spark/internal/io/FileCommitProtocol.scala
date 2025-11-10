@@ -206,6 +206,8 @@ abstract class FileCommitProtocol extends Logging {
   def onTaskCommit(taskCommit: TaskCommitMessage): Unit = {
     logDebug(s"onTaskCommit($taskCommit)")
   }
+
+  def useStagingDir(): Boolean = true
 }
 
 

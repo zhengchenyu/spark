@@ -110,6 +110,14 @@ case class InsertIntoHadoopFsRelationCommand(
     var customPartitionLocations: Map[TablePartitionSpec, String] = Map.empty
     var matchingPartitions: Seq[CatalogTablePartition] = Seq.empty
 
+    val jobId = java.util.UUID.randomUUID().toString
+    val committer = FileCommitProtocol.instantiate(
+      sparkSession.sessionState.conf.fileCommitProtocolClass,
+      jobId = jobId,
+      outputPath = outputPath.toString,
+      dynamicPartitionOverwrite = dynamicPartitionOverwrite,
+      mode = mode.name())
+
     // When partitions are tracked by the catalog, compute all custom partition locations that
     // may be relevant to the insertion job.
     if (partitionsTrackedByCatalog) {
@@ -118,7 +126,8 @@ case class InsertIntoHadoopFsRelationCommand(
       initialMatchingPartitions = matchingPartitions.map(_.spec)
       customPartitionLocations = getCustomPartitionLocations(
         fs, catalogTable.get, qualifiedOutputPath, matchingPartitions)
-    } else if (mode == SaveMode.Overwrite && isPartitionOverwriteStaticMode) {
+    } else if (mode == SaveMode.Overwrite && isPartitionOverwriteStaticMode &&
+        !committer.useStagingDir()) {
       // In static partition overwrite mode without catalog, we need to delete matching partitions
       // based on the static partition spec.
       val globbedPath = staticPartitions match {
@@ -140,14 +149,6 @@ case class InsertIntoHadoopFsRelationCommand(
       }
     }
 
-    val jobId = java.util.UUID.randomUUID().toString
-    val committer = FileCommitProtocol.instantiate(
-      sparkSession.sessionState.conf.fileCommitProtocolClass,
-      jobId = jobId,
-      outputPath = outputPath.toString,
-      dynamicPartitionOverwrite = dynamicPartitionOverwrite,
-      mode = mode.name())
-
     val doInsertion = if (mode == SaveMode.Append) {
       true
     } else {
@@ -159,6 +160,9 @@ case class InsertIntoHadoopFsRelationCommand(
           if (ifPartitionNotExists && matchingPartitions.nonEmpty) {
             false
           } else {
+            if (!committer.useStagingDir()) {
+              deleteMatchingPartitions(fs, qualifiedOutputPath, customPartitionLocations, committer)
+            }
             true
           }
         case (SaveMode.Overwrite, _) | (SaveMode.ErrorIfExists, false) =>
@@ -185,8 +189,10 @@ case class InsertIntoHadoopFsRelationCommand(
         if (mode == SaveMode.Overwrite && isPartitionOverwriteStaticMode) {
           val deletedPartitions = initialMatchingPartitions.toSet -- updatedPartitions
           if (deletedPartitions.nonEmpty) {
-            deletePartitions(fs, qualifiedOutputPath, customPartitionLocations, deletedPartitions,
-              committer)
+            if (committer.useStagingDir()) {
+              deletePartitions(fs, qualifiedOutputPath, customPartitionLocations, deletedPartitions,
+                committer)
+            }
             if (partitionsTrackedByCatalog) {
               AlterTableDropPartitionCommand(
                 catalogTable.get.identifier, deletedPartitions.toSeq,

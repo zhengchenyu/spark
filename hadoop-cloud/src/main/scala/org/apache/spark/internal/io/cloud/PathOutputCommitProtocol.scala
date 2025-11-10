@@ -84,7 +84,7 @@ class PathOutputCommitProtocol(
    */
   override protected def setupCommitter(context: TaskAttemptContext): PathOutputCommitter = {
     logTrace(s"Setting up committer for path $destination")
-    committer = PathOutputCommitterFactory.createCommitter(stagingDir, context)
+    committer = PathOutputCommitterFactory.createCommitter(destPath, context)
 
     // Special feature to force out the FileOutputCommitter, so as to guarantee
     // that the binding is working properly.
@@ -183,6 +183,8 @@ class PathOutputCommitProtocol(
         s" by committer $committer")
     }
   }
+
+  override def useStagingDir(): Boolean = false
 }
 
 object PathOutputCommitProtocol {
