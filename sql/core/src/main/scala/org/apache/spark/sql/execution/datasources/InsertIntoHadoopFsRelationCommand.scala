@@ -127,7 +127,7 @@ case class InsertIntoHadoopFsRelationCommand(
       customPartitionLocations = getCustomPartitionLocations(
         fs, catalogTable.get, qualifiedOutputPath, matchingPartitions)
     } else if (mode == SaveMode.Overwrite && isPartitionOverwriteStaticMode &&
-        !committer.useStagingDir()) {
+        committer.useStagingDir()) {
       // In static partition overwrite mode without catalog, we need to delete matching partitions
       // based on the static partition spec.
       val globbedPath = staticPartitions match {

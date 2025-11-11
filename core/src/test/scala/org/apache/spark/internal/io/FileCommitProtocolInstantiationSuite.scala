@@ -127,7 +127,7 @@ private class FullConstructorCommitProtocol(
     this(arg1, arg2, "", 2)
   }
 
-  def this(arg1: String, arg2: String, b: Boolean) = {
+  def this(arg1: String, arg2: String, args: String) = {
     this(arg1, arg2, "", 3)
   }
 }

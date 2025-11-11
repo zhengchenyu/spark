@@ -23,8 +23,7 @@ import org.apache.hadoop.fs.{Path, StreamCapabilities}
 import org.apache.hadoop.mapreduce.TaskAttemptContext
 import org.apache.hadoop.mapreduce.lib.output.{FileOutputCommitter, PathOutputCommitter, PathOutputCommitterFactory}
 
-import org.apache.spark.internal.io.FileNameSpec
-import org.apache.spark.sql.execution.datasources.SQLHadoopMapReduceCommitProtocol
+import org.apache.spark.internal.io.{FileNameSpec, HadoopMapReduceCommitProtocol}
 
 /**
  * Spark Commit protocol for Path Output Committers.
@@ -58,7 +57,7 @@ class PathOutputCommitProtocol(
     jobId: String,
     dest: String,
     mode: String = "")
-  extends SQLHadoopMapReduceCommitProtocol(jobId, dest, mode)
+  extends HadoopMapReduceCommitProtocol(jobId, dest, mode)
     with Serializable {
 
   require(dest != null, "Null destination specified")
