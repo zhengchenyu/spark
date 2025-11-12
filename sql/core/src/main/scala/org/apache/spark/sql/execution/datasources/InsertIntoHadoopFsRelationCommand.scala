@@ -75,12 +75,13 @@ case class InsertIntoHadoopFsRelationCommand(
       staticPartitions.size < partitionColumns.length
   }
 
-  private[sql] lazy val isPartitionOverwriteStaticMode: Boolean = {
-    parameters.get(DataSourceUtils.PARTITION_OVERWRITE_MODE)
+  private[sql] lazy val staticPartitionOverwrite: Boolean = {
+    val partitionOverwriteMode = parameters.get(DataSourceUtils.PARTITION_OVERWRITE_MODE)
       // scalastyle:off caselocale
       .map(mode => PartitionOverwriteMode.withName(mode.toUpperCase))
       // scalastyle:on caselocale
       .getOrElse(conf.partitionOverwriteMode) == PartitionOverwriteMode.STATIC
+    partitionOverwriteMode && mode == SaveMode.Overwrite
   }
 
   override def requiredOrdering: Seq[SortOrder] =
@@ -126,8 +127,7 @@ case class InsertIntoHadoopFsRelationCommand(
       initialMatchingPartitions = matchingPartitions.map(_.spec)
       customPartitionLocations = getCustomPartitionLocations(
         fs, catalogTable.get, qualifiedOutputPath, matchingPartitions)
-    } else if (mode == SaveMode.Overwrite && isPartitionOverwriteStaticMode &&
-        committer.useStagingDir()) {
+    } else if (staticPartitionOverwrite && committer.useStagingDir()) {
       // In static partition overwrite mode without catalog, we need to delete matching partitions
       // based on the static partition spec.
       val globbedPath = staticPartitions match {
@@ -186,7 +186,7 @@ case class InsertIntoHadoopFsRelationCommand(
               ifNotExists = true).run(sparkSession)
           }
         }
-        if (mode == SaveMode.Overwrite && isPartitionOverwriteStaticMode) {
+        if (staticPartitionOverwrite) {
           val deletedPartitions = initialMatchingPartitions.toSet -- updatedPartitions
           if (deletedPartitions.nonEmpty) {
             if (committer.useStagingDir()) {
