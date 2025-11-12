@@ -116,7 +116,7 @@ case class InsertIntoHadoopFsRelationCommand(
       jobId = jobId,
       outputPath = outputPath.toString,
       dynamicPartitionOverwrite = dynamicPartitionOverwrite,
-      mode = mode.name())
+      mode = Option(mode).map(_.name).getOrElse(""))
 
     // When partitions are tracked by the catalog, compute all custom partition locations that
     // may be relevant to the insertion job.
