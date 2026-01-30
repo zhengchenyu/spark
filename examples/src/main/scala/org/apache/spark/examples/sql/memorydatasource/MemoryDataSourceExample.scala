@@ -42,9 +42,9 @@ object MemoryDataSourceExample {
       // Configure extension
       .config("spark.sql.extensions",
         "org.apache.spark.examples.sql.memorydatasource.MemoryExtension")
+      // set partitions is 1
+      .config("spark.sql.shuffle.partitions", "1")
       .getOrCreate()
-
-    spark.sparkContext.setLogLevel("WARN")
 
     try {
       println("\n" + "="*60)
