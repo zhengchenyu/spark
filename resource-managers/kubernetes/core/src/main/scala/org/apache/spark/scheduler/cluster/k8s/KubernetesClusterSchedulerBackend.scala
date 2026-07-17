@@ -120,6 +120,23 @@ private[spark] class KubernetesClusterSchedulerBackend(
     if (!conf.get(KUBERNETES_EXECUTOR_DISABLE_CONFIGMAP)) {
       setUpExecutorConfigMap(podAllocator.driverPod)
     }
+    // Patch the dedicated UI Service's targetPort to match the actual bound port of the driver's
+    // Jetty server. Only applies when the UI service feature is enabled (see
+    // KUBERNETES_DRIVER_UI_SERVICE_ENABLED). Requires `patch services` RBAC on the driver's SA.
+    // Mirrors Flink FLINK-24947.
+    if (conf.get(KUBERNETES_DRIVER_UI_SERVICE_ENABLED)) {
+      conf.getOption(
+        org.apache.spark.deploy.k8s.features.DriverServiceFeatureStep
+          .KUBERNETES_DRIVER_UI_SERVICE_NAME_INTERNAL).foreach { svcName =>
+        sc.ui.map(_.boundPort).foreach { actualPort =>
+          K8sDriverUIServicePatcher.patchTargetPort(
+            kubernetesClient,
+            conf.get(KUBERNETES_NAMESPACE),
+            svcName,
+            actualPort)
+        }
+      }
+    }
   }
 
   override def stop(): Unit = {
