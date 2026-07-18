@@ -81,9 +81,15 @@ private[spark] class DriverUIServiceFeatureStep(
   override def configurePod(pod: SparkPod): SparkPod = pod
 
   override def getAdditionalPodSystemProperties(): Map[String, String] = {
+    logInfo(s"DriverUIServiceFeatureStep.getAdditionalPodSystemProperties invoked; " +
+      s"enabled=$enabled, resourceNamePrefix=${kubernetesConf.resourceNamePrefix}")
     if (enabled) {
-      Map(KUBERNETES_DRIVER_UI_SERVICE_NAME_INTERNAL -> serviceName)
+      val props = Map(KUBERNETES_DRIVER_UI_SERVICE_NAME_INTERNAL -> serviceName)
+      logInfo(s"Injecting UI service internal name into driver SparkConf: $props")
+      props
     } else {
+      logInfo("UI service disabled (spark.kubernetes.driver.ui.service.enabled=false), " +
+        "skipping internal name injection")
       Map.empty
     }
   }
