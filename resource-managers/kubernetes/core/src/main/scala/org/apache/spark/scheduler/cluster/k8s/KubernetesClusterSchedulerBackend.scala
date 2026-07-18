@@ -126,7 +126,7 @@ private[spark] class KubernetesClusterSchedulerBackend(
     // Mirrors Flink FLINK-24947.
     if (conf.get(KUBERNETES_DRIVER_UI_SERVICE_ENABLED)) {
       conf.getOption(
-        org.apache.spark.deploy.k8s.features.DriverServiceFeatureStep
+        org.apache.spark.deploy.k8s.features.DriverUIServiceFeatureStep
           .KUBERNETES_DRIVER_UI_SERVICE_NAME_INTERNAL).foreach { svcName =>
         sc.ui.map(_.boundPort).foreach { actualPort =>
           K8sDriverUIServicePatcher.patchTargetPort(
