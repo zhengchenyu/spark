@@ -46,7 +46,22 @@ private[spark] class DriverUIServiceFeatureStep(
 
   private val enabled = kubernetesConf.get(KUBERNETES_DRIVER_UI_SERVICE_ENABLED)
   private lazy val serviceType = kubernetesConf.get(KUBERNETES_DRIVER_UI_SERVICE_TYPE)
-  private lazy val driverUIPort = kubernetesConf.get(config.UI.UI_PORT)
+  private lazy val configuredUIPort = kubernetesConf.get(config.UI.UI_PORT)
+
+  /**
+   * Port value used when building the Service. When the user has requested a random UI port
+   * (`spark.ui.port=0`), the actual port is only known after the driver's Jetty server binds,
+   * so we substitute the default UI port (typically 4040) purely as a placeholder to satisfy
+   * Kubernetes' Service port validation (must be > 0). After the driver JVM starts,
+   * [[org.apache.spark.scheduler.cluster.k8s.K8sDriverUIServicePatcher]] updates the Service's
+   * `targetPort` to the real bound port; this placeholder never carries traffic because
+   * Ingress backends reference the Service, not a Node port.
+   */
+  private lazy val servicePort: Int = if (configuredUIPort == 0) {
+    config.UI.UI_PORT.defaultValue.get
+  } else {
+    configuredUIPort
+  }
 
   private lazy val serviceName: String = {
     // Prefer an explicit name (typically injected by an external controller like Spark Operator
@@ -88,8 +103,8 @@ private[spark] class DriverUIServiceFeatureStep(
         .withSelector(kubernetesConf.labels.asJava)
         .addNewPort()
           .withName(UI_PORT_NAME)
-          .withPort(driverUIPort)
-          .withNewTargetPort(driverUIPort)   // placeholder; patched at runtime
+          .withPort(servicePort)
+          .withNewTargetPort(servicePort)   // placeholder if configured port is 0; patched at runtime
           .endPort()
         .endSpec()
       .build()

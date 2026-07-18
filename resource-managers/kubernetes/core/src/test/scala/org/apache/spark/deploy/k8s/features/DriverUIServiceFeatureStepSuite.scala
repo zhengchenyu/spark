@@ -99,4 +99,22 @@ class DriverUIServiceFeatureStepSuite extends SparkFunSuite {
     assert(uiSvc.getSpec.getPorts.size === 1)
     assert(uiSvc.getSpec.getPorts.get(0).getName === UI_PORT_NAME)
   }
+
+  test("SPARK-49407: spark.ui.port=0 substitutes the default UI port as Service placeholder") {
+    // K8s Service.spec.ports[].port must be in [1, 65535]. When the user requests a random
+    // UI port (0), Service creation would otherwise fail validation. We substitute the default
+    // UI port (typically 4040) purely as a placeholder; the driver-side patcher rewrites
+    // targetPort to the actual bound port once Jetty starts.
+    val sparkConf = new SparkConf(false)
+      .set(UI_PORT, 0)
+      .set(KUBERNETES_DRIVER_UI_SERVICE_ENABLED, true)
+    val kconf = KubernetesTestConf.createDriverConf(sparkConf = sparkConf)
+    val step = new DriverUIServiceFeatureStep(kconf)
+
+    val uiSvc = step.getAdditionalKubernetesResources().head.asInstanceOf[Service]
+    val expectedPlaceholder = UI_PORT.defaultValue.get
+    assert(uiSvc.getSpec.getPorts.size === 1)
+    assert(uiSvc.getSpec.getPorts.get(0).getPort.intValue() === expectedPlaceholder)
+    assert(uiSvc.getSpec.getPorts.get(0).getTargetPort.getIntVal === expectedPlaceholder)
+  }
 }
