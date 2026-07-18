@@ -124,11 +124,18 @@ private[spark] class KubernetesClusterSchedulerBackend(
     // Jetty server. Only applies when the UI service feature is enabled (see
     // KUBERNETES_DRIVER_UI_SERVICE_ENABLED). Requires `patch services` RBAC on the driver's SA.
     // Mirrors Flink FLINK-24947.
-    if (conf.get(KUBERNETES_DRIVER_UI_SERVICE_ENABLED)) {
-      conf.getOption(
-        org.apache.spark.deploy.k8s.features.DriverUIServiceFeatureStep
-          .KUBERNETES_DRIVER_UI_SERVICE_NAME_INTERNAL).foreach { svcName =>
-        sc.ui.map(_.boundPort).foreach { actualPort =>
+    val uiServiceEnabled = conf.get(KUBERNETES_DRIVER_UI_SERVICE_ENABLED)
+    val internalSvcName = conf.getOption(
+      org.apache.spark.deploy.k8s.features.DriverUIServiceFeatureStep
+        .KUBERNETES_DRIVER_UI_SERVICE_NAME_INTERNAL)
+    val boundUIPort = sc.ui.map(_.boundPort)
+    logInfo(s"UI Service patcher preflight: " +
+      s"${org.apache.spark.deploy.k8s.Config.KUBERNETES_DRIVER_UI_SERVICE_ENABLED.key}=" +
+      s"$uiServiceEnabled, internalName=${internalSvcName.getOrElse("<unset>")}, " +
+      s"boundUIPort=${boundUIPort.map(_.toString).getOrElse("<none — SparkUI not initialized>")}")
+    if (uiServiceEnabled) {
+      internalSvcName.foreach { svcName =>
+        boundUIPort.foreach { actualPort =>
           K8sDriverUIServicePatcher.patchTargetPort(
             kubernetesClient,
             conf.get(KUBERNETES_NAMESPACE),

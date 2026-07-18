@@ -56,6 +56,8 @@ private[k8s] object K8sDriverUIServicePatcher extends Logging {
       namespace: String,
       serviceName: String,
       actualPort: Int): Unit = {
+    logInfo(s"K8sDriverUIServicePatcher.patchTargetPort invoked; " +
+      s"namespace='$namespace', serviceName='$serviceName', actualPort=$actualPort")
     try {
       val service = client.services()
         .inNamespace(namespace)
@@ -69,6 +71,15 @@ private[k8s] object K8sDriverUIServicePatcher extends Logging {
         return
       }
 
+      logInfo(s"Fetched UI service '$serviceName': " +
+        s"type=${service.getSpec.getType}, " +
+        s"clusterIP=${service.getSpec.getClusterIP}, " +
+        s"ports=${service.getSpec.getPorts.asScala.map(p =>
+          s"${p.getName}(port=${p.getPort},targetPort=${p.getTargetPort.getStrVal match {
+            case null => p.getTargetPort.getIntVal.toString
+            case s => s
+          }})").mkString(",")}")
+
       val currentTargetPort = service.getSpec.getPorts.asScala
         .find(_.getName == UI_PORT_NAME)
         .map(_.getTargetPort.getIntVal.toInt)
@@ -79,6 +90,9 @@ private[k8s] object K8sDriverUIServicePatcher extends Logging {
             s"($actualPort); no patch needed.")
 
         case _ =>
+          logInfo(s"Preparing to patch UI service '$serviceName' targetPort: " +
+            s"current=${currentTargetPort.map(_.toString).getOrElse("<unset>")}, " +
+            s"actualPort=$actualPort")
           val updated = new ServiceBuilder(service)
             .editSpec()
               .editMatchingPort(portBuilder => portBuilder.build().getName == UI_PORT_NAME)
@@ -100,7 +114,9 @@ private[k8s] object K8sDriverUIServicePatcher extends Logging {
         // Fail-fast: bubble up so the caller can decide (typically driver will exit and let the
         // controller retry). Do NOT silently swallow — that would leave UI Ingress pointing at
         // the wrong port and be very hard to diagnose.
-        logError(s"Failed to patch UI service '$serviceName' targetPort to $actualPort", e)
+        logError(s"Failed to patch UI service '$serviceName' targetPort to $actualPort " +
+          s"(namespace='$namespace'). Check that the driver's ServiceAccount has " +
+          s"'patch services' permission and that the Service exists.", e)
         throw e
     }
   }
