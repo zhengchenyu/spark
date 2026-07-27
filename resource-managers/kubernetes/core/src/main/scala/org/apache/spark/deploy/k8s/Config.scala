@@ -565,6 +565,13 @@ private[spark] object Config extends Logging {
       .stringConf
       .createWithDefault("direct")
 
+  val KUBERNETES_KUEUE_WORKLOAD_API_VERSION =
+    ConfigBuilder("spark.kubernetes.kueue.workload.apiVersion")
+      .doc("Kueue Workload API version used by the Kueue in-place resize pods allocator.")
+      .version("4.3.0")
+      .stringConf
+      .createWithDefault("v1beta1")
+
   val KUBERNETES_EXECUTOR_POD_DELETION_COST =
     ConfigBuilder("spark.kubernetes.executor.podDeletionCost")
       .doc("Value to set for the controller.kubernetes.io/pod-deletion-cost" +

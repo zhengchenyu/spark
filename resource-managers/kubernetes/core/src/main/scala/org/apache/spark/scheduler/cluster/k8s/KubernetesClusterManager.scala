@@ -177,6 +177,8 @@ private[spark] class KubernetesClusterManager extends ExternalClusterManager wit
         classOf[StatefulSetPodsAllocator].getName
       case "deployment" =>
         classOf[DeploymentPodsAllocator].getName
+      case "kueue" =>
+        classOf[KueueExecutorPodsAllocator].getName
       case "direct" =>
         classOf[ExecutorPodsAllocator].getName
       case fullClass =>

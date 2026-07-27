@@ -61,6 +61,7 @@ class KubernetesClusterManagerSuite extends SparkFunSuite with BeforeAndAfter {
     val validConfigs = List("statefulset", "deployment", "direct",
       classOf[StatefulSetPodsAllocator].getName,
       classOf[DeploymentPodsAllocator].getName,
+      classOf[KueueExecutorPodsAllocator].getName,
       classOf[ExecutorPodsAllocator].getName)
     validConfigs.foreach { c =>
       val manager = new KubernetesClusterManager()
@@ -68,6 +69,15 @@ class KubernetesClusterManagerSuite extends SparkFunSuite with BeforeAndAfter {
       manager.makeExecutorPodsAllocator(sc, kubernetesClient, null)
       sparkConf.remove(KUBERNETES_ALLOCATION_PODS_ALLOCATOR)
     }
+  }
+
+  test("constructing a KueueExecutorPodsAllocator works") {
+    val manager = new KubernetesClusterManager()
+    sparkConf.set(KUBERNETES_ALLOCATION_PODS_ALLOCATOR, "kueue")
+
+    val allocator = manager.makeExecutorPodsAllocator(sc, kubernetesClient, null)
+
+    assert(allocator.isInstanceOf[KueueExecutorPodsAllocator])
   }
 
   test("SPARK-45948: Single-pod Spark jobs respect spark.app.id") {
