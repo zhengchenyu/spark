@@ -116,6 +116,7 @@ class KueueExecutorPodsAllocatorSuite extends SparkFunSuite with BeforeAndAfter 
       name: String = "spark-app",
       executorSpecCount: Int = 0,
       admittedExecutorCount: Option[Int] = None,
+      targetExecutorCount: Option[Int] = None,
       finished: Boolean = false): GenericKubernetesResource = {
     val wl = new GenericKubernetesResource()
     wl.setMetadata(new ObjectMetaBuilder().withName(name).withNamespace("default").build())
@@ -131,7 +132,11 @@ class KueueExecutorPodsAllocatorSuite extends SparkFunSuite with BeforeAndAfter 
     admittedExecutorCount.foreach { a =>
       val assignments = new java.util.ArrayList[Object]()
       assignments.add(assignmentMap(driverPodSet, 1))
-      assignments.add(assignmentMap(executorPodSet, a))
+      val execAssignment = assignmentMap(executorPodSet, a)
+      // Kueue sets reclaimTargetCount on the executor assignment to request a partial-preemption
+      // scale-down (below the admitted count).
+      targetExecutorCount.foreach(e => execAssignment.put("reclaimTargetCount", Int.box(e)))
+      assignments.add(execAssignment)
       val admission = new java.util.LinkedHashMap[String, Object]()
       admission.put("podSetAssignments", assignments)
       status.put("admission", admission)
@@ -323,5 +328,40 @@ class KueueExecutorPodsAllocatorSuite extends SparkFunSuite with BeforeAndAfter 
     val patchJson = ArgumentCaptor.forClass(classOf[String])
     verify(genericResource).patch(any(classOf[PatchContext]), patchJson.capture())
     assert(patchedPodSets(patchJson.getValue)(executorPodSet).get("count") === 4)
+  }
+
+  test("partial preemption: reclaimTargetCount caps the executor target below the admitted count") {
+    when(driverPodResource.get()).thenReturn(driverPodWithController(true))
+    // Admitted 5, but Kueue requests a partial-preemption scale-down to 2 via reclaimTargetCount.
+    // specCount is already 2 (the count patch is exercised separately below) so this test
+    // isolates the effective-target cap without triggering a spec patch.
+    seedWorkloads(buildWorkload(
+      executorSpecCount = 2, admittedExecutorCount = Some(5), targetExecutorCount = Some(2)))
+
+    val allocator = newAllocator()
+    allocator.start(TEST_SPARK_APP_ID, schedulerBackend)
+    // Dynamic allocation still wants 5, but the effective target is min(5, admitted 5, expected 2).
+    allocator.setTotalExpectedExecutors(Map(defaultProfile() -> 5))
+
+    assert(allocator.executorTarget(DEFAULT_RESOURCE_PROFILE_ID) === Some(2))
+  }
+
+  test("partial preemption: patched count follows reclaimTargetCount down, floored at occupying") {
+    when(driverPodResource.get()).thenReturn(driverPodWithController(true))
+    seedWorkloads(buildWorkload(
+      executorSpecCount = 5, admittedExecutorCount = Some(5), targetExecutorCount = Some(2)))
+
+    val allocator = newAllocator()
+    allocator.start(TEST_SPARK_APP_ID, schedulerBackend)
+    // 3 executor pods still occupy resources while shedding towards reclaimTargetCount=2.
+    snapshotsStore.replaceSnapshot(
+      Seq(runningExecutor(1), runningExecutor(2), runningExecutor(3)))
+    allocator.setTotalExpectedExecutors(Map(defaultProfile() -> 5))
+
+    // requestedTarget = min(DA 5, expected 2) = 2, floored at occupying 3 => patch count = 3
+    // (heading down to 2 as the remaining pods terminate; quota released only as pods leave).
+    val patchJson = ArgumentCaptor.forClass(classOf[String])
+    verify(genericResource).patch(any(classOf[PatchContext]), patchJson.capture())
+    assert(patchedPodSets(patchJson.getValue)(executorPodSet).get("count") === 3)
   }
 }
