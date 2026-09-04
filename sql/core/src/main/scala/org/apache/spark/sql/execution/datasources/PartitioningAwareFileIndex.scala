@@ -159,7 +159,7 @@ abstract class PartitioningAwareFileIndex(
     files.filter(matchPathPattern)
   }
 
-  protected def inferPartitioning(): PartitionSpec = {
+  def inferPartitioning(): PartitionSpec = {
     if (recursiveFileLookup) {
       PartitionSpec.emptySpec
     } else {

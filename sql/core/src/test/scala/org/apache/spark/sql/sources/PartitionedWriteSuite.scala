@@ -326,8 +326,8 @@ class PartitionedWriteSuite extends SharedSparkSession {
 private class PartitionFileExistCommitProtocol(
     jobId: String,
     path: String,
-    dynamicPartitionOverwrite: Boolean)
-  extends SQLHadoopMapReduceCommitProtocol(jobId, path, dynamicPartitionOverwrite) {
+    mode: String = "")
+  extends SQLHadoopMapReduceCommitProtocol(jobId, path, mode) {
   override def setupJob(jobContext: JobContext): Unit = {
     super.setupJob(jobContext)
     val stagingDir = new File(new Path(path).toUri.getPath, s".spark-staging-$jobId")
