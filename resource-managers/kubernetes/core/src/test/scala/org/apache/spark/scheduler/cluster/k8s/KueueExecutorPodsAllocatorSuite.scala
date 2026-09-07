@@ -21,7 +21,7 @@ import java.nio.charset.StandardCharsets.UTF_8
 
 import scala.jdk.CollectionConverters._
 
-import io.fabric8.kubernetes.api.model.{GenericKubernetesResource, GenericKubernetesResourceList, ObjectMetaBuilder, Pod, PodBuilder}
+import io.fabric8.kubernetes.api.model.{GenericKubernetesResource, GenericKubernetesResourceList, ObjectMetaBuilder, Pod, PodBuilder, PodList}
 import io.fabric8.kubernetes.client.{KubernetesClient, Watch}
 import io.fabric8.kubernetes.client.dsl.{FilterWatchListDeletable, MixedOperation, NonNamespaceOperation, PodResource, Resource}
 import io.fabric8.kubernetes.client.dsl.base.{PatchContext, ResourceDefinitionContext}
@@ -67,9 +67,8 @@ class KueueExecutorPodsAllocatorSuite extends SparkFunSuite with BeforeAndAfter 
   @Mock private var watch: Watch = _
 
   // Pod operation mocks so the base ExecutorPodsAllocator.onNewSnapshots can run.
-  @Mock private var pods: MixedOperation[Pod, io.fabric8.kubernetes.api.model.PodList, PodResource] = _
-  @Mock private var podsWithNamespace:
-    NonNamespaceOperation[Pod, io.fabric8.kubernetes.api.model.PodList, PodResource] = _
+  @Mock private var pods: MixedOperation[Pod, PodList, PodResource] = _
+  @Mock private var podsWithNamespace: NonNamespaceOperation[Pod, PodList, PodResource] = _
   @Mock private var driverPodResource: PodResource = _
   @Mock private var execPodResource: PodResource = _
   @Mock private var executorBuilder: KubernetesExecutorBuilder = _
@@ -117,9 +116,13 @@ class KueueExecutorPodsAllocatorSuite extends SparkFunSuite with BeforeAndAfter 
       executorSpecCount: Int = 0,
       admittedExecutorCount: Option[Int] = None,
       targetExecutorCount: Option[Int] = None,
+      observedGeneration: Option[Long] = None,
+      generation: Option[Long] = Some(1L),
       finished: Boolean = false): GenericKubernetesResource = {
+    val metadata = new ObjectMetaBuilder().withName(name).withNamespace("default").build()
+    generation.foreach(g => metadata.setGeneration(g))
     val wl = new GenericKubernetesResource()
-    wl.setMetadata(new ObjectMetaBuilder().withName(name).withNamespace("default").build())
+    wl.setMetadata(metadata)
 
     val podSets = new java.util.ArrayList[Object]()
     podSets.add(podSetMap(driverPodSet, 1))
@@ -141,12 +144,21 @@ class KueueExecutorPodsAllocatorSuite extends SparkFunSuite with BeforeAndAfter 
       admission.put("podSetAssignments", assignments)
       status.put("admission", admission)
     }
+    val conditions = new java.util.ArrayList[Object]()
+    observedGeneration.foreach { generation =>
+      val condition = new java.util.LinkedHashMap[String, Object]()
+      condition.put("type", "UnrelatedCondition")
+      condition.put("status", "True")
+      condition.put("observedGeneration", Long.box(generation))
+      conditions.add(condition)
+    }
     if (finished) {
       val cond = new java.util.LinkedHashMap[String, Object]()
       cond.put("type", "Finished")
       cond.put("status", "True")
-      val conditions = new java.util.ArrayList[Object]()
       conditions.add(cond)
+    }
+    if (!conditions.isEmpty) {
       status.put("conditions", conditions)
     }
     if (!status.isEmpty) {
@@ -177,6 +189,8 @@ class KueueExecutorPodsAllocatorSuite extends SparkFunSuite with BeforeAndAfter 
     conf = new SparkConf(false)
       .set("spark.app.id", TEST_SPARK_APP_ID)
       .set(KUBERNETES_DRIVER_POD_NAME, driverPodName)
+      .set(KUBERNETES_KUEUE_RESIZE_UP_INTERVAL, 0L)
+      .set(KUBERNETES_KUEUE_RESIZE_UP_MIN_INCREMENT, 1)
       .set(KUBERNETES_DRIVER_OWN_PVC, false)
       .set(KUBERNETES_DRIVER_REUSE_PVC, false)
     secMgr = new SecurityManager(conf)
@@ -191,7 +205,7 @@ class KueueExecutorPodsAllocatorSuite extends SparkFunSuite with BeforeAndAfter 
     when(genericFiltered.watch(any())).thenReturn(watch)
     when(genericNamespaced.resource(any(classOf[GenericRes]))).thenReturn(genericResource)
     when(genericResource.patch(any(classOf[PatchContext]), anyString))
-      .thenAnswer((inv: InvocationOnMock) => inv.getArgument(0))
+      .thenReturn(null)
 
     // Pod DSL chain so the base allocator's onNewSnapshots can run without NPEs.
     when(kubernetesClient.pods()).thenReturn(pods)
@@ -284,6 +298,49 @@ class KueueExecutorPodsAllocatorSuite extends SparkFunSuite with BeforeAndAfter 
     assert(podSets(executorPodSet).get("count") === 2)
     // Driver PodSet preserved at its original count and not mutated.
     assert(podSets(driverPodSet).get("count") === 1)
+  }
+
+  test("normal resize waits for a newer Kueue condition before patching again") {
+    when(driverPodResource.get()).thenReturn(driverPodWithController(true))
+    val initial = buildWorkload(
+      executorSpecCount = 2,
+      admittedExecutorCount = Some(2),
+      observedGeneration = Some(1),
+      generation = Some(1))
+    val pending = buildWorkload(
+      executorSpecCount = 4,
+      admittedExecutorCount = Some(2),
+      observedGeneration = Some(1),
+      generation = Some(2))
+    when(genericResource.patch(any(classOf[PatchContext]), anyString)).thenReturn(pending)
+    seedWorkloads(initial)
+
+    val allocator = newAllocator()
+    allocator.start(TEST_SPARK_APP_ID, schedulerBackend)
+    allocator.setTotalExpectedExecutors(Map(defaultProfile() -> 4))
+    verify(genericResource).patch(any(classOf[PatchContext]), anyString)
+
+    val patchCount = org.mockito.Mockito.mockingDetails(genericResource).getInvocations.asScala
+      .count(_.getMethod.getName == "patch")
+    allocator.setTotalExpectedExecutors(Map(defaultProfile() -> 5))
+    val blockedPatchCount = org.mockito.Mockito.mockingDetails(genericResource)
+      .getInvocations.asScala.count(_.getMethod.getName == "patch")
+    assert(blockedPatchCount === patchCount)
+
+    val acknowledged = buildWorkload(
+      executorSpecCount = 4,
+      admittedExecutorCount = Some(4),
+      observedGeneration = Some(2),
+      generation = Some(2))
+    // Simulate the MODIFIED event that refreshes the allocator cache.
+    val watcher = ArgumentCaptor.forClass(classOf[io.fabric8.kubernetes.client.Watcher[GenericRes]])
+    verify(genericFiltered).watch(watcher.capture())
+    watcher.getValue.eventReceived(io.fabric8.kubernetes.client.Watcher.Action.MODIFIED,
+      acknowledged)
+    allocator.setTotalExpectedExecutors(Map(defaultProfile() -> 5))
+    val finalPatchCount = org.mockito.Mockito.mockingDetails(genericResource).getInvocations.asScala
+      .count(_.getMethod.getName == "patch")
+    assert(finalPatchCount === patchCount + 1)
   }
 
   test("reconcile skips the patch when spec already matches the desired count") {

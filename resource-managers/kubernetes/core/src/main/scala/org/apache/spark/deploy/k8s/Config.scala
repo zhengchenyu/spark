@@ -572,6 +572,30 @@ private[spark] object Config extends Logging {
       .stringConf
       .createWithDefault("v1beta1")
 
+  val KUBERNETES_KUEUE_RESIZE_UP_INTERVAL =
+    ConfigBuilder("spark.kubernetes.kueue.resizeUpInterval")
+      .doc("Minimum interval between Kueue Workload scale-up requests.")
+      .version("4.3.0")
+      .timeConf(TimeUnit.MILLISECONDS)
+      .checkValue(_ >= 0, "Kueue resize-up interval must be non-negative")
+      .createWithDefaultString("0ms")
+
+  val KUBERNETES_KUEUE_RESIZE_UP_MIN_INCREMENT =
+    ConfigBuilder("spark.kubernetes.kueue.resizeUpMinIncrement")
+      .doc("Minimum executor increment for a normal Kueue Workload scale-up request.")
+      .version("4.3.0")
+      .intConf
+      .checkValue(_ >= 0, "Kueue resize-up minimum increment must be non-negative")
+      .createWithDefault(0)
+
+  val KUBERNETES_KUEUE_FORCE_KILL_ON_RECLAIM =
+    ConfigBuilder("spark.kubernetes.kueue.forceKillOnReclaim")
+      .doc("Whether to force-kill executors during Kueue partial preemption, even when " +
+        "decommission is enabled.")
+      .version("4.3.0")
+      .booleanConf
+      .createWithDefault(true)
+
   val KUBERNETES_EXECUTOR_POD_DELETION_COST =
     ConfigBuilder("spark.kubernetes.executor.podDeletionCost")
       .doc("Value to set for the controller.kubernetes.io/pod-deletion-cost" +

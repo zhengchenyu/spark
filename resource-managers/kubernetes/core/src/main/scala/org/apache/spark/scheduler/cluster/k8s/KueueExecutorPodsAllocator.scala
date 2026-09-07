@@ -49,12 +49,12 @@ import org.apache.spark.util.{Clock, Utils}
  *   - reads the admitted executor count from `status.admission` and caps the number of executor
  *     pods it creates to min(target count, admitted count);
  *   - honors `status.admission.podSetAssignments[].reclaimTargetCount` when Kueue requests a
- *     partial-preemption scale-down: it caps the executor request at reclaimTargetCount, sheds the excess
- *     running executors down to reclaimTargetCount (graceful decommission when spark.decommission.enabled
- *     is set, else force-kill) so a busy job releases the quota instead of waiting for an
- *     idle-timeout that never fires, and lowers the count it asks Kueue for towards reclaimTargetCount
- *     (floored at the occupying count), so the borrowed quota is given back as the shed pods
- *     actually terminate.
+ *     partial-preemption scale-down: it caps the executor request at reclaimTargetCount, sheds
+ *     the excess running executors down to reclaimTargetCount (graceful decommission when
+ *     spark.decommission.enabled is set, else force-kill) so a busy job releases the quota
+ *     instead of waiting for an idle-timeout that never fires, and lowers the count it asks
+ *     Kueue for towards reclaimTargetCount (floored at the occupying count), so the borrowed
+ *     quota is given back as the shed pods actually terminate.
  *
  * Kueue is the sole writer of the Workload status (the admitted and expected counts); Spark only
  * writes `spec.podSets[].count`. Whether a scale-up is needed is decided by (target count >
@@ -81,6 +81,9 @@ private[spark] class KueueExecutorPodsAllocator(
   // counts); used to log admission changes at INFO without per-snapshot spam. Only touched from
   // the (single-threaded) snapshot subscriber callback.
   private var lastEffectiveTargets: Map[Int, Int] = Map.empty
+
+  // Timestamp of the most recent normal scale-up request.
+  private var lastScaleUpAtMillis: Option[Long] = None
 
   // Executor ids we have already asked to shed (decommission or force-kill) for partial preemption.
   // Prevents re-issuing the request for the same executor on every snapshot while it drains/exits.
@@ -143,13 +146,13 @@ private[spark] class KueueExecutorPodsAllocator(
   /**
    * Force a partial-preemption scale-down: when Kueue sets a reclaimTargetCount below the number of
    * currently running executors, shed the excess down to reclaimTargetCount instead of relying on
-   * dynamic-allocation idle-timeout — which never fires while the executors are busy, so a loaded
+   * dynamic-allocation idle-timeout - which never fires while the executors are busy, so a loaded
    * job would otherwise never release the reclaimed quota.
    *
    * When graceful decommission is enabled (spark.decommission.enabled), the excess executors are
    * decommissioned: each finishes its running tasks and stops taking new ones before exiting (no
    * task loss; shuffle is served by the remote shuffle service on K8s). When it is disabled they
-   * are force-killed instead, so the borrowed quota is still released — we must not hold onto it
+   * are force-killed instead, so the borrowed quota is still released - we must not hold onto it
    * just because decommission is off. Either way, once the pods terminate occupancy drops and
    * reconcileExecutorPodSet lowers spec.count so Kueue releases the quota.
    *
@@ -182,7 +185,13 @@ private[spark] class KueueExecutorPodsAllocator(
     // adjustTargetNumExecutors=false in both paths: applyAdmittedExecutorTargets already caps the
     // request at reclaimTargetCount, so no replacement pods are created; we must not also lower the
     // backend's target.
-    if (conf.get(DECOMMISSION_ENABLED)) {
+    if (conf.get(KUBERNETES_KUEUE_FORCE_KILL_ON_RECLAIM) || !conf.get(DECOMMISSION_ENABLED)) {
+      // Force-kill so the borrowed quota is released promptly.
+      schedulerBackend.killExecutors(toShed, adjustTargetNumExecutors = false,
+        countFailures = false, force = true)
+      logInfo(s"Kueue partial preemption: force-killed ${toShed.size} " +
+        s"executor(s) [${toShed.mkString(",")}] to reach reclaimTargetCount=$reclaimTargetCount")
+    } else {
       val infos = toShed.map { id =>
         id -> ExecutorDecommissionInfo(
           s"Kueue partial preemption: scaling executors down to $reclaimTargetCount")
@@ -190,13 +199,6 @@ private[spark] class KueueExecutorPodsAllocator(
       schedulerBackend.decommissionExecutors(infos, adjustTargetNumExecutors = false,
         triggeredByExecutor = false)
       logInfo(s"Kueue partial preemption: requested decommission of ${toShed.size} " +
-        s"executor(s) [${toShed.mkString(",")}] to reach reclaimTargetCount=$reclaimTargetCount")
-    } else {
-      // Decommission disabled: force-kill so the borrowed quota is still released. force=true is
-      // required to remove busy executors.
-      schedulerBackend.killExecutors(toShed, adjustTargetNumExecutors = false,
-        countFailures = false, force = true)
-      logInfo(s"Kueue partial preemption: decommission disabled, force-killed ${toShed.size} " +
         s"executor(s) [${toShed.mkString(",")}] to reach reclaimTargetCount=$reclaimTargetCount")
     }
     shedRequested.addAll(toShed.asJava)
@@ -206,13 +208,13 @@ private[spark] class KueueExecutorPodsAllocator(
    * Patch the `executor` PodSet's count on the single Workload to match the desired executor count.
    * Both scale-up and scale-down are an in-place count patch; the driver PodSet, all templates, and
    * the executor PodSet's minCount are preserved untouched (this allocator never reads or writes
-   * minCount — it is a fixed job property owned by the Kueue integration).
+   * minCount - it is a fixed job property owned by the Kueue integration).
    *
    * On scale-down the patched count is floored at the number of executor pods still occupying
    * resources (`occupying`): Spark dynamic allocation lowers its target immediately when the
    * backlog drains, but only tears the idle executors down later (after `executorIdleTimeout`).
    * Patching straight to the low target would make Kueue converge the admission and release the
-   * quota while those executor pods are still occupying resources — a transient over-subscription
+   * quota while those executor pods are still occupying resources - a transient over-subscription
    * window. Flooring the patched count at the occupying count makes Kueue release quota only as
    * pods actually stop occupying resources (the teardown is driven by dynamic allocation
    * independently of this count, so the occupying count keeps dropping and the patched count
@@ -228,20 +230,50 @@ private[spark] class KueueExecutorPodsAllocator(
     val occupyingExecutors = occupying.getOrElse(ResourceProfile.DEFAULT_RESOURCE_PROFILE_ID, 0)
     val admittedExecutors = workloadClient.admittedCount(wl, ExecutorPodSetName).getOrElse(0)
     val targetPreemptExecutors = workloadClient.reclaimTargetCount(wl, ExecutorPodSetName)
-    // When Kueue requests a partial-preemption scale-down (reclaimTargetCount < target), lower the
-    // count we ask Kueue for to reclaimTargetCount so the borrowed quota is given back; still floored
-    // at the occupying count so the release tracks actual pod termination (no transient
-    // over-subscription). Absent reclaimTargetCount => normal behavior (ask for the dynamic-allocation
-    // target), which preserves scale-up (target may exceed the admitted count).
+    val currentSpec = workloadClient.specCount(wl, ExecutorPodSetName).getOrElse(0)
     val requestedTarget = targetPreemptExecutors.map(math.min(target, _)).getOrElse(target)
     val desiredExecutors = math.max(requestedTarget, occupyingExecutors)
 
-    if (!workloadClient.specCount(wl, ExecutorPodSetName).contains(desiredExecutors)) {
-      workloadClient.patchExecutorPodSetCount(wl, ExecutorPodSetName, desiredExecutors)
-      logInfo(s"Patched Kueue Workload ${workloadKey(wl)} executor PodSet to count=" +
-        s"$desiredExecutors (target=$target, occupying=$occupyingExecutors, " +
-        s"admitted=$admittedExecutors, target=${targetPreemptExecutors.getOrElse("-")})")
+    if (currentSpec == desiredExecutors) {
+      logDebug(s"Skipping Kueue Workload ${workloadKey(wl)} resize: " +
+        s"spec=$currentSpec already matches desired=$desiredExecutors, " +
+        s"target=$target, occupying=$occupyingExecutors, admitted=$admittedExecutors, " +
+        s"reclaimTarget=${targetPreemptExecutors.getOrElse("-")}")
+      return
     }
+
+    val scaleUp = desiredExecutors > currentSpec
+    val currentGeneration = workloadClient.generation(wl).getOrElse(-1L)
+    val observedGeneration = workloadClient.maxObservedGeneration(wl)
+    if (scaleUp && observedGeneration.exists(_ < currentGeneration)) {
+      logDebug(s"Skipping Kueue Workload ${workloadKey(wl)} scale-up: " +
+        s"generation=$currentGeneration is not acknowledged by " +
+        s"observedGeneration=$observedGeneration, current=$currentSpec, " +
+        s"desired=$desiredExecutors")
+      return
+    }
+
+    val interval = conf.get(KUBERNETES_KUEUE_RESIZE_UP_INTERVAL)
+    val minIncrement = conf.get(KUBERNETES_KUEUE_RESIZE_UP_MIN_INCREMENT)
+    val now = clock.getTimeMillis()
+    val intervalElapsed = lastScaleUpAtMillis.forall(now - _ >= interval)
+    val incrementReached = desiredExecutors - currentSpec >= minIncrement
+    if (scaleUp && !intervalElapsed && !incrementReached) {
+      logDebug(s"Skipping Kueue Workload ${workloadKey(wl)} scale-up: " +
+        s"both limits are unmet, current=$currentSpec, desired=$desiredExecutors, " +
+        s"increment=${desiredExecutors - currentSpec}, minIncrement=$minIncrement, " +
+        s"lastScaleUpAt=${lastScaleUpAtMillis.getOrElse("never")}, interval=$interval")
+      return
+    }
+
+    val patched = workloadClient.patchExecutorPodSetCount(wl, ExecutorPodSetName, desiredExecutors)
+    if (scaleUp) {
+      lastScaleUpAtMillis = Some(clock.getTimeMillis())
+    }
+    logInfo(s"Patched Kueue Workload ${workloadKey(wl)} executor PodSet to count=" +
+      s"$desiredExecutors (target=$target, occupying=$occupyingExecutors, " +
+      s"admitted=$admittedExecutors, reclaimTarget=${targetPreemptExecutors.getOrElse("-")}, " +
+      s"generation=${workloadClient.generation(patched).getOrElse("unknown")})")
   }
 
   private def applyAdmittedExecutorTargets(desired: Map[Int, Int]): Unit = {
@@ -286,7 +318,8 @@ private[spark] class KueueExecutorPodsAllocator(
     }
   }
 
-  /** The admitted executor count, keyed by the default ResourceProfile id (single executor PodSet). */
+  // The admitted executor count, keyed by the default ResourceProfile
+  // id (single executor PodSet).
   private def admittedCountsSnapshot(): Map[Int, Int] = {
     workloadClient.cachedWorkload().flatMap { wl =>
       workloadClient.admittedCount(wl, ExecutorPodSetName)
@@ -296,8 +329,8 @@ private[spark] class KueueExecutorPodsAllocator(
 
   /**
    * The Kueue-requested partial-preemption "scale down to" executor count, keyed by the default
-   * ResourceProfile id. Present only when Kueue has requested a partial preemption (reclaimTargetCount
-   * set on the executor PodSet's admission); empty otherwise.
+   * ResourceProfile id. Present only when Kueue has requested a partial preemption
+   * (reclaimTargetCount set on the executor PodSet's admission); empty otherwise.
    */
   private def reclaimTargetCountsSnapshot(): Map[Int, Int] = {
     workloadClient.cachedWorkload().flatMap { wl =>
@@ -314,7 +347,7 @@ private[spark] class KueueExecutorPodsAllocator(
    * Executor pods that currently occupy resources/quota, from the latest API-server-derived
    * snapshot (`ExecutorPodsSnapshot`), keyed by the default ResourceProfile id (single executor
    * PodSet). Used as the scale-down floor for the target count so Kueue releases quota only as pods
-   * actually stop occupying resources — a killed executor keeps counting until the API server has
+   * actually stop occupying resources - a killed executor keeps counting until the API server has
    * removed its pod.
    *
    * Occupying (counted): `PodRunning` / `PodTerminating` (holding resources now),
@@ -441,7 +474,7 @@ private[spark] object KueueExecutorPodsAllocator {
     def patchExecutorPodSetCount(
         workload: GenericKubernetesResource,
         podSetName: String,
-        count: Int): Unit = {
+        count: Int): GenericKubernetesResource = {
       val existingPodSets = mapProperty(workload, "spec")
         .flatMap(spec => listProperty(spec, "podSets"))
         .getOrElse(Nil)
@@ -465,6 +498,7 @@ private[spark] object KueueExecutorPodsAllocator {
       // Refresh the cache with the patched object so a subsequent reconcile does not re-patch
       // stale spec counts before the watch delivers the MODIFIED event.
       Option(patched).foreach(w => cache.put(w.getMetadata.getName, w))
+      Option(patched).getOrElse(workload)
     }
 
     /** Admitted count of the named PodSet from status.admission, if the Workload is admitted. */
@@ -496,6 +530,20 @@ private[spark] object KueueExecutorPodsAllocator {
 
     def specCount(workload: GenericKubernetesResource, podSetName: String): Option[Int] = {
       podSet(workload, podSetName).flatMap(ps => intProperty(ps, "count"))
+    }
+
+    def generation(workload: GenericKubernetesResource): Option[Long] = {
+      Option(workload.getMetadata).flatMap(m => Option(m.getGeneration)).map(_.longValue())
+    }
+
+    /** Maximum observed generation across all Workload conditions. */
+    def maxObservedGeneration(workload: GenericKubernetesResource): Option[Long] = {
+      mapProperty(workload, "status")
+        .flatMap(status => listProperty(status, "conditions"))
+        .getOrElse(Nil)
+        .flatMap(asMap)
+        .flatMap(m => longProperty(m, "observedGeneration"))
+        .reduceOption(_ max _)
     }
 
     private def podSet(
@@ -544,6 +592,16 @@ private[spark] object KueueExecutorPodsAllocator {
         map: java.util.Map[String, Object],
         key: String): Option[String] = {
       Option(map.get(key)).map(_.toString)
+    }
+
+    private def longProperty(
+        map: java.util.Map[String, Object],
+        key: String): Option[Long] = {
+      Option(map.get(key)).flatMap {
+        case n: java.lang.Number => Some(n.longValue())
+        case s: String => scala.util.Try(s.toLong).toOption
+        case _ => None
+      }
     }
 
     private def intProperty(
